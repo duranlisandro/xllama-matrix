@@ -28,7 +28,12 @@
     #include "xllama/utf8_utils.h"
 
     #include <winrt/Windows.Data.Json.h>
+    #include <winrt/Windows.Networking.Connectivity.h>
+    #include <winrt/Windows.Networking.h>
     #include <winrt/Windows.UI.Xaml.Media.Imaging.h>
+    #ifndef XLLAMA_STORE_SKU
+        #include "xllama/api_activity.h"
+    #endif
 
     #include <algorithm>
     #include <chrono>
@@ -150,18 +155,28 @@ void MainPageController::BuildUI() {
     outerGrid.RowDefinitions().Append(rowStar);
     outerGrid.RowDefinitions().Append(rowAuto2);
 
-    // ---- Row 0: header (model name + status + progress bar) ----
-    StackPanel header;
+    // ---- Row 0: header (left: chat model + status + progress; right: LAN API) ----
+    Grid header;
     Grid::SetRow(header, 0);
+    ColumnDefinition headerMain;
+    headerMain.Width(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
+    ColumnDefinition headerApi;
+    headerApi.Width(GridLengthHelper::Auto());
+    header.ColumnDefinitions().Append(headerMain);
+    header.ColumnDefinitions().Append(headerApi);
+    StackPanel headerLeft;
+    Grid::SetColumn(headerLeft, 0);
 
     m_modelText = TextBlock();
     m_modelText.FontSize(28);
     m_modelText.FontWeight(FontWeights::SemiBold());
     m_modelText.Text(L"xllama");
 
+    // 10-foot: 18pt at full or near-full opacity reads from the couch; the old
+    // 14pt / 0.7 status line did not.
     m_statusText = TextBlock();
-    m_statusText.FontSize(14);
-    m_statusText.Opacity(0.7);
+    m_statusText.FontSize(18);
+    m_statusText.Opacity(0.85);
     m_statusText.Margin(ThicknessHelper::FromLengths(0, 4, 0, 0));
     m_statusText.Text(L"Loading model...");
 
@@ -170,9 +185,45 @@ void MainPageController::BuildUI() {
     m_loadingBar.Visibility(Visibility::Collapsed);
     m_loadingBar.Margin(ThicknessHelper::FromLengths(0, 8, 0, 0));
 
-    header.Children().Append(m_modelText);
-    header.Children().Append(m_statusText);
-    header.Children().Append(m_loadingBar);
+    headerLeft.Children().Append(m_modelText);
+    headerLeft.Children().Append(m_statusText);
+    headerLeft.Children().Append(m_loadingBar);
+    header.Children().Append(headerLeft);
+
+    // LAN API panel: hidden while the endpoint is stopped (and in the Store SKU,
+    // which has no endpoint). Lines: endpoint URL, current request, counters,
+    // last error.
+    m_apiPanel = StackPanel();
+    Grid::SetColumn(m_apiPanel, 1);
+    m_apiPanel.Margin(ThicknessHelper::FromLengths(32, 0, 0, 0));
+    // Effective pixels: the Xbox shell lays apps out at 960x540 (2x scale). Cap
+    // the panel at half the width so a long error never squeezes the chat model
+    // and status out of the left column (seen on-console before this cap).
+    m_apiPanel.MaxWidth(480);
+    m_apiPanel.Visibility(Visibility::Collapsed);
+    auto api_line = [](double size, double opacity) {
+        TextBlock line;
+        line.FontSize(size);
+        line.Opacity(opacity);
+        line.HorizontalAlignment(HorizontalAlignment::Right);
+        line.TextAlignment(TextAlignment::Right);
+        line.TextTrimming(TextTrimming::CharacterEllipsis);
+        return line;
+    };
+    m_apiEndpointText = api_line(20, 1.0);
+    m_apiEndpointText.FontWeight(FontWeights::SemiBold());
+    m_apiNowText = api_line(18, 1.0);
+    m_apiCountsText = api_line(16, 0.85);
+    m_apiErrorText = api_line(16, 1.0);
+    m_apiErrorText.TextWrapping(TextWrapping::Wrap);
+    m_apiErrorText.MaxLines(2);
+    m_apiErrorText.Foreground(winrt::Windows::UI::Xaml::Media::SolidColorBrush({255, 240, 80, 70}));
+    m_apiErrorText.Visibility(Visibility::Collapsed);
+    m_apiPanel.Children().Append(m_apiEndpointText);
+    m_apiPanel.Children().Append(m_apiNowText);
+    m_apiPanel.Children().Append(m_apiCountsText);
+    m_apiPanel.Children().Append(m_apiErrorText);
+    header.Children().Append(m_apiPanel);
 
     // ---- Row 1: scroll area (prompt input + output text) ----
     m_outputScroll = ScrollViewer();
@@ -232,51 +283,74 @@ void MainPageController::BuildUI() {
     Grid::SetRow(footer, 2);
     footer.Margin(ThicknessHelper::FromLengths(0, 16, 0, 0));
 
-    ColumnDefinition colStar;
-    colStar.Width(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
-    ColumnDefinition colAuto;
-    colAuto.Width(GridLengthHelper::Auto());
-    footer.ColumnDefinitions().Append(colStar);
-    footer.ColumnDefinitions().Append(colAuto);
+    // Two rows: metrics above, buttons below. Sharing one row, the icon buttons
+    // left ~135 px for the metrics, which truncated "0.1s to first token" (seen
+    // on-console).
+    RowDefinition metricsRow;
+    metricsRow.Height(GridLengthHelper::Auto());
+    RowDefinition buttonsRow;
+    buttonsRow.Height(GridLengthHelper::Auto());
+    footer.RowDefinitions().Append(metricsRow);
+    footer.RowDefinitions().Append(buttonsRow);
 
     m_metricsText = TextBlock();
-    m_metricsText.FontSize(12);
-    m_metricsText.Opacity(0.7);
-    m_metricsText.VerticalAlignment(VerticalAlignment::Center);
-    Grid::SetColumn(m_metricsText, 0);
+    m_metricsText.FontSize(16);
+    m_metricsText.Opacity(0.85);
+    m_metricsText.Margin(ThicknessHelper::FromLengths(0, 0, 0, 8));
+    m_metricsText.TextTrimming(TextTrimming::CharacterEllipsis);
+    Grid::SetRow(m_metricsText, 0);
 
     StackPanel btnPanel;
     btnPanel.Orientation(Orientation::Horizontal);
-    Grid::SetColumn(btnPanel, 1);
+    btnPanel.HorizontalAlignment(HorizontalAlignment::Right);
+    Grid::SetRow(btnPanel, 1);
+
+    // Segoe MDL2 Assets glyphs (system font on Xbox) instead of ASCII stand-ins.
+    auto icon_label = [](wchar_t glyph, wchar_t const* label) {
+        StackPanel content;
+        content.Orientation(Orientation::Horizontal);
+        FontIcon icon;
+        icon.FontFamily(winrt::Windows::UI::Xaml::Media::FontFamily(L"Segoe MDL2 Assets"));
+        icon.Glyph(std::wstring(1, glyph));
+        icon.FontSize(18);
+        icon.Margin(ThicknessHelper::FromLengths(0, 0, 10, 0));
+        TextBlock text;
+        text.Text(label);
+        text.VerticalAlignment(VerticalAlignment::Center);
+        content.Children().Append(icon);
+        content.Children().Append(text);
+        return content;
+    };
 
     m_settingsButton = Button();
-    m_settingsButton.Content(winrt::box_value(L"[S]  Settings"));
+    m_settingsButton.Content(icon_label(0xE713, L"Settings"));
     m_settingsButton.MinWidth(100);
     m_settingsButton.Margin(ThicknessHelper::FromLengths(0, 0, 12, 0));
 
     m_newChatButton = Button();
-    m_newChatButton.Content(winrt::box_value(L"+  New"));
+    m_newChatButton.Content(icon_label(0xE710, L"New"));
     m_newChatButton.MinWidth(100);
     m_newChatButton.Margin(ThicknessHelper::FromLengths(0, 0, 12, 0));
 
     m_historyButton = Button();
-    m_historyButton.Content(winrt::box_value(L"[=]  History"));
+    m_historyButton.Content(icon_label(0xE81C, L"History"));
     m_historyButton.MinWidth(100);
     m_historyButton.Margin(ThicknessHelper::FromLengths(0, 0, 12, 0));
 
     m_imageButton = Button();
-    m_imageButton.Content(winrt::box_value(L"[*]  Image"));
+    m_imageButton.Content(icon_label(0xEB9F, L"Image"));
     m_imageButton.MinWidth(100);
     m_imageButton.Margin(ThicknessHelper::FromLengths(0, 0, 12, 0));
 
     m_runButton = Button();
-    m_runButton.Content(winrt::box_value(L"▶  Run"));
+    m_runButton.Content(icon_label(0xE768, L"Run"));
     m_runButton.MinWidth(120);
     m_runButton.Margin(ThicknessHelper::FromLengths(0, 0, 12, 0));
     m_runButton.IsEnabled(false); // disabled until EnsureModelAsync confirms model is ready
 
     m_cancelButton = Button();
-    m_cancelButton.Content(winrt::box_value(L"■  Cancel"));
+    // E711 (Cancel, an X): the Stop square E71A read as an empty checkbox on TV.
+    m_cancelButton.Content(icon_label(0xE711, L"Cancel"));
     m_cancelButton.IsEnabled(false);
     m_cancelButton.MinWidth(120);
 
@@ -420,6 +494,9 @@ void MainPageController::Init() {
 
     EnsureModelAsync();
     ShowDisclaimerIfNeeded();
+    #ifndef XLLAMA_STORE_SKU
+    StartApiPanel();
+    #endif
 }
 
 // ---------------------------------------------------------------------------
@@ -503,7 +580,7 @@ void MainPageController::SetStatus(std::wstring const& msg, StatusKind kind) {
         break;
     default: // Info
         m_statusText.ClearValue(TextBlock::ForegroundProperty());
-        m_statusText.Opacity(0.7);
+        m_statusText.Opacity(0.85);
         m_statusText.Text(msg);
         break;
     }
@@ -1044,33 +1121,48 @@ winrt::fire_and_forget MainPageController::ShowHistory() {
     winrt::Windows::UI::Xaml::Controls::ListView lv;
     lv.SelectionMode(winrt::Windows::UI::Xaml::Controls::ListViewSelectionMode::Single);
     lv.Height(400);
-    lv.Width(580);
+    // A ContentDialog caps its content near 548 effective px: the old 580 px list
+    // with wrapping titles pushed the delete button past the dialog edge (seen
+    // on-console). Rows are a fixed-width grid: title + details | delete.
+    lv.Width(500);
     std::string current_id = m_current.id;
 
     // Shared state: when a Delete button fires it sets this and hides the dialog
     auto delete_pending = std::make_shared<std::string>();
 
     for (const auto& meta : index) {
-        winrt::Windows::UI::Xaml::Controls::StackPanel row;
-        row.Orientation(winrt::Windows::UI::Xaml::Controls::Orientation::Horizontal);
+        winrt::Windows::UI::Xaml::Controls::Grid row;
+        row.Width(456);
+        winrt::Windows::UI::Xaml::Controls::ColumnDefinition text_col;
+        text_col.Width(winrt::Windows::UI::Xaml::GridLengthHelper::FromValueAndType(
+            1, winrt::Windows::UI::Xaml::GridUnitType::Star));
+        winrt::Windows::UI::Xaml::Controls::ColumnDefinition button_col;
+        button_col.Width(winrt::Windows::UI::Xaml::GridLengthHelper::Auto());
+        row.ColumnDefinitions().Append(text_col);
+        row.ColumnDefinitions().Append(button_col);
 
+        winrt::Windows::UI::Xaml::Controls::StackPanel text;
+        text.VerticalAlignment(winrt::Windows::UI::Xaml::VerticalAlignment::Center);
         winrt::Windows::UI::Xaml::Controls::TextBlock tb;
         tb.FontSize(16);
-        tb.TextWrapping(winrt::Windows::UI::Xaml::TextWrapping::Wrap);
-        tb.MaxWidth(480);
-        tb.VerticalAlignment(winrt::Windows::UI::Xaml::VerticalAlignment::Center);
-        std::wstring prefix = (meta.id == current_id) ? L"● " : L"   ";
-        std::wstring ts = FormatRelativeTs(meta.last_modified);
-        wchar_t buf[256];
-        swprintf_s(buf, L"%s%s  (%d msgs)  •  %s", prefix.c_str(),
-                   ::xllama::utf8_to_wstring(meta.title).c_str(), meta.n_messages, ts.c_str());
-        tb.Text(buf);
+        tb.TextTrimming(winrt::Windows::UI::Xaml::TextTrimming::CharacterEllipsis);
+        std::wstring prefix = (meta.id == current_id) ? L"\u25CF " : L"";
+        tb.Text(prefix + ::xllama::utf8_to_wstring(meta.title));
+        winrt::Windows::UI::Xaml::Controls::TextBlock details;
+        details.FontSize(14);
+        details.Opacity(0.85);
+        details.Text(std::to_wstring(meta.n_messages) +
+                     (meta.n_messages == 1 ? L" message" : L" messages") + L"  \u2022  " +
+                     FormatRelativeTs(meta.last_modified));
+        text.Children().Append(tb);
+        text.Children().Append(details);
 
         winrt::Windows::UI::Xaml::Controls::Button del_btn;
         del_btn.Content(winrt::box_value(L"✕"));
         del_btn.Width(48);
         del_btn.VerticalAlignment(winrt::Windows::UI::Xaml::VerticalAlignment::Center);
         del_btn.Margin(winrt::Windows::UI::Xaml::ThicknessHelper::FromLengths(8, 0, 0, 0));
+        winrt::Windows::UI::Xaml::Controls::Grid::SetColumn(del_btn, 1);
         auto meta_id = meta.id;
         // Weak capture of dlg: a strong capture closed a refcount cycle
         // (dlg → Content → … → Button → Click → dlg) and leaked the whole
@@ -1083,7 +1175,7 @@ winrt::fire_and_forget MainPageController::ShowHistory() {
                 d.Hide();
         });
 
-        row.Children().Append(tb);
+        row.Children().Append(text);
         row.Children().Append(del_btn);
         lv.Items().Append(row);
     }
@@ -1363,6 +1455,125 @@ void MainPageController::SaveSettings() {
 }
 
     #ifndef XLLAMA_STORE_SKU
+// The console's LAN IPv4: the address on the adapter of the internet profile,
+// else the first IPv4 host name. Empty if none (shown as a placeholder).
+static std::wstring ResolveLanIpv4() {
+    using namespace winrt::Windows::Networking;
+    using namespace winrt::Windows::Networking::Connectivity;
+    try {
+        winrt::guid adapter{};
+        bool have_adapter = false;
+        if (auto profile = NetworkInformation::GetInternetConnectionProfile();
+            profile && profile.NetworkAdapter()) {
+            adapter = profile.NetworkAdapter().NetworkAdapterId();
+            have_adapter = true;
+        }
+        std::wstring fallback;
+        for (auto const& host : NetworkInformation::GetHostNames()) {
+            if (host.Type() != HostNameType::Ipv4 || !host.IPInformation())
+                continue;
+            std::wstring ip(host.CanonicalName().c_str());
+            auto nic = host.IPInformation().NetworkAdapter();
+            if (have_adapter && nic && nic.NetworkAdapterId() == adapter)
+                return ip;
+            if (fallback.empty())
+                fallback = ip;
+        }
+        return fallback;
+    } catch (...) {
+        return {};
+    }
+}
+
+static std::wstring FormatSeconds(double seconds) {
+    wchar_t buf[32];
+    if (seconds < 60.0)
+        swprintf(buf, 32, L"%.1fs", seconds);
+    else
+        swprintf(buf, 32, L"%dm%02ds", static_cast<int>(seconds) / 60,
+                 static_cast<int>(seconds) % 60);
+    return buf;
+}
+
+void MainPageController::StartApiPanel() {
+    auto weak_self = weak_from_this();
+    auto dispatcher = m_root.Dispatcher();
+    // Host names are a synchronous WinRT query: resolve once, off the UI thread.
+    std::thread([weak_self, dispatcher]() {
+        winrt::init_apartment();
+        std::wstring ip = ResolveLanIpv4();
+        dispatcher.RunAsync(CoreDispatcherPriority::Normal, [weak_self, ip]() {
+            if (auto s = weak_self.lock()) {
+                s->m_lan_ip = ip;
+                s->RefreshApiPanel();
+            }
+        });
+    }).detach();
+
+    m_api_timer = winrt::Windows::UI::Xaml::DispatcherTimer{};
+    m_api_timer.Interval(std::chrono::seconds(1));
+    m_api_tick_token = m_api_timer.Tick([weak_self](IInspectable const&, IInspectable const&) {
+        if (auto s = weak_self.lock())
+            s->RefreshApiPanel();
+    });
+    m_api_timer.Start();
+    RefreshApiPanel();
+}
+
+void MainPageController::RefreshApiPanel() {
+    namespace Media = winrt::Windows::UI::Xaml::Media;
+    const auto server = ::xllama::api::server_status();
+    if (server.state == ::xllama::api::ServerState::Stopped) {
+        m_apiPanel.Visibility(Visibility::Collapsed);
+        return;
+    }
+    m_apiPanel.Visibility(Visibility::Visible);
+
+    winrt::Windows::UI::Color color{255, 100, 220, 100}; // listening: green
+    if (server.state == ::xllama::api::ServerState::Starting)
+        color = {255, 240, 190, 60}; // amber
+    else if (server.state == ::xllama::api::ServerState::Error)
+        color = {255, 240, 80, 70}; // red
+    const std::wstring host = m_lan_ip.empty() ? L"<console IP>" : m_lan_ip;
+    const std::wstring port = server.port > 0 ? L":" + std::to_wstring(server.port) : L"";
+    m_apiEndpointText.Text(L"\u25CF LAN API  http://" + host + port + L"/v1");
+    m_apiEndpointText.Foreground(Media::SolidColorBrush(color));
+
+    const auto snap = ::xllama::api::activity().snapshot();
+    if (server.state == ::xllama::api::ServerState::Error) {
+        m_apiNowText.Text(::xllama::utf8_to_wstring(server.message));
+    } else if (server.state == ::xllama::api::ServerState::Starting) {
+        m_apiNowText.Text(L"starting...");
+    } else if (snap.in_flight) {
+        std::wstring now = L"\u25B6 " + ::xllama::utf8_to_wstring(snap.in_flight->endpoint);
+        if (!snap.in_flight->model.empty())
+            now += L" \u00B7 " + ::xllama::utf8_to_wstring(snap.in_flight->model);
+        m_apiNowText.Text(now + L" \u00B7 " + FormatSeconds(snap.in_flight->elapsed_s));
+    } else {
+        m_apiNowText.Text(L"idle");
+    }
+
+    std::wstring counts = std::to_wstring(snap.requests) +
+                          (snap.requests == 1 ? L" request" : L" requests") + L" \u00B7 " +
+                          std::to_wstring(snap.busy) + L" busy";
+    if (snap.last) {
+        counts += L" \u00B7 last " + FormatSeconds(snap.last->elapsed_s);
+        if (snap.last->prompt_tokens >= 0 && snap.last->completion_tokens >= 0)
+            counts += L" " + std::to_wstring(snap.last->prompt_tokens) + L"\u2192" +
+                      std::to_wstring(snap.last->completion_tokens) + L" tok";
+    }
+    m_apiCountsText.Text(counts);
+
+    // A recent error stays visible for 10 minutes, then the panel calms down.
+    if (snap.last_error && snap.last_error->age_s < 600.0) {
+        m_apiErrorText.Text(L"! " + ::xllama::utf8_to_wstring(snap.last_error->message) + L" (" +
+                            FormatSeconds(snap.last_error->age_s) + L" ago)");
+        m_apiErrorText.Visibility(Visibility::Visible);
+    } else {
+        m_apiErrorText.Visibility(Visibility::Collapsed);
+    }
+}
+
 void MainPageController::ApplyApiSettings(bool enabled, int port) {
     if (enabled) {
         write_local_bytes(L"api-port.txt", std::to_string(port));
@@ -1566,8 +1777,10 @@ winrt::fire_and_forget MainPageController::ShowSettings() {
     const auto api_snapshot = ::xllama::api::server_status();
     switch (api_snapshot.state) {
     case ::xllama::api::ServerState::Running:
-        apiStatus.Text(L"Status: listening on port " + std::to_wstring(api_snapshot.port) +
-                       L". Trusted LAN only; no authentication.");
+        apiStatus.Text(L"Status: listening at http://" +
+                       (m_lan_ip.empty() ? std::wstring(L"<console IP>") : m_lan_ip) + L":" +
+                       std::to_wstring(api_snapshot.port) +
+                       L"/v1. Trusted LAN only; no authentication.");
         break;
     case ::xllama::api::ServerState::Starting:
         apiStatus.Text(L"Status: starting. Trusted LAN only; no authentication.");
@@ -2933,7 +3146,24 @@ void MainPageController::StartInference(std::wstring const& prompt_w) {
             // swapped from under us (LAN API requests report busy meanwhile,
             // exactly as they do against each other).
             auto& hub = ::xllama::session_hub();
-            std::lock_guard<std::mutex> hub_lk(hub.mtx);
+            std::unique_lock<std::mutex> hub_lk(hub.mtx, std::try_to_lock);
+            if (!hub_lk.owns_lock()) {
+                // Another job holds the single slot: a LAN request, a pre-load,
+                // a KV snapshot save or a pull's model swap. Say which when we
+                // can, instead of a silent stall, then wait for it.
+                std::wstring waiting = L"Waiting for the model to be free...";
+    #ifndef XLLAMA_STORE_SKU
+                if (::xllama::api::activity().snapshot().in_flight)
+                    waiting = L"Waiting for LAN API request to finish...";
+    #endif
+                dispatcher.RunAsync(CoreDispatcherPriority::Normal, [self, waiting]() {
+                    self->SetStatus(waiting, StatusKind::Working);
+                });
+                hub_lk.lock();
+                dispatcher.RunAsync(CoreDispatcherPriority::Normal, [self]() {
+                    self->SetStatus(L"Loading model...", StatusKind::Working);
+                });
+            }
             // The other surface may have swapped the resident model between
             // our turns — the persistent generator the KV flag refers to is
             // gone. Fall back to a full prefill (no user-visible failure).

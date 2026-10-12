@@ -18,7 +18,16 @@ XLLAMA_UWP`; the Linux/CLI build is unaffected.
 
 The normal path is **Settings → LAN API**: choose a port and toggle the endpoint
 on or off. The listener starts, stops, or rebinds immediately without an app
-restart, and the dialog shows its current state.
+restart, and the dialog shows its current state and base URL.
+
+While the endpoint is on, the main screen shows a **LAN API panel** (header,
+right): base URL `http://<console IP>:<port>/v1`, the in-flight request
+(endpoint, model, elapsed), counters (requests, `busy` rejections), the last
+request's time and tokens, and the last failed request for 10 minutes. The
+counters live in `xllama::api::activity()` (`include/xllama/api_activity.h`),
+recorded for chat, embeddings and image requests. A pad turn that finds the
+slot taken shows "Waiting for LAN API request to finish..." instead of
+stalling silently.
 
 For operator automation, `api.flag` and `api-port.txt` in `LocalState` remain the
 persistent contract. `api.flag` is not consumed: `App::OnLaunched` applies it,
@@ -34,7 +43,10 @@ live XAML chat UI.
   request — the GUI pre-loads it when a model becomes Ready — and it is
   swapped when a request names a different model. A swap invalidates the
   GUI's KV-reuse state (`hub.generation`): its next turn silently falls back
-  to a full prefill.
+  to a full prefill. A model id that is neither resident nor a loadable
+  `LocalState\models\<id>` directory gets **`404`** "model '<id>' is not on this
+  console; see GET /v1/models" (chat and embeddings), before any load is
+  attempted.
 - **GGUF GPU layers:** a GGUF session gets the catalogue entry's `gpu_layers`
   (D3 default per model). `LocalState\gguf_gpu_layers.txt`, when present,
   overrides it for the GUI and this API alike; `0` forces the CPU. A change
