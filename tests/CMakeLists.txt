@@ -24,6 +24,7 @@ add_executable(xllama-tests
     test_inference_progress.cpp
     test_chat_prompt.cpp
     test_prompt_budget.cpp
+    test_tool_proposal.cpp
     test_manifest_merge.cpp
     test_membw.cpp
     test_diskbw.cpp
@@ -58,6 +59,7 @@ target_include_directories(xllama-tests PRIVATE
 target_compile_definitions(xllama-tests PRIVATE
     GOLDEN_JSON_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../diffusion/golden_vectors.json"
     CLIP_TOKENIZER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../diffusion/clip_tokenizer"
-    PARITY_GOLDEN_BIN="${CMAKE_CURRENT_SOURCE_DIR}/golden/logits-smol-short.bin")
+    PARITY_GOLDEN_BIN="${CMAKE_CURRENT_SOURCE_DIR}/golden/logits-smol-short.bin"
+    LLAMA_TEMPLATES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../llama.cpp/models/templates")
 
 add_test(NAME xllama-tests COMMAND xllama-tests)
