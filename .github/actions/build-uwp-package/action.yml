@@ -110,7 +110,7 @@ runs:
           Configuration = 'Release'
           Platform      = 'x64'
           Backend       = $('${{ inputs.variant }}' -eq 'unified' ? 'unified' : '${{ inputs.variant }}')
-          BuildRevision = [int]'${{ inputs.build_revision }}'
+          BuildRevision = [int]'${{ inputs.build_revision }}' + 1299
         }
         if ('${{ inputs.patched }}' -eq 'true') {
           $buildArgs.PatchedGenAI = $true

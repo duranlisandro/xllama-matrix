@@ -51,7 +51,7 @@ jobs:
           patched: ${{ matrix.patched }}
           store_sku: "false"
           artifact: ${{ matrix.artifact }}
-          build_revision: ${{ github.run_number + 1299 }}
+          build_revision: ${{ github.run_number }}
 
   # Store SKU: separate job so the gate can use inputs.* (matrix.* is illegal
   # in job-level if). Only on workflow_dispatch with store_sku=true.
@@ -93,4 +93,4 @@ jobs:
           patched: "true"
           store_sku: "true"
           artifact: xllama-appx-store
-          build_revision: ${{ github.run_number + 1299 }}
+          build_revision: ${{ github.run_number }}
