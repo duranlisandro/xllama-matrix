@@ -1,3 +1,14 @@
+> ## ⚠️ Personal build infrastructure — not the upstream project, and not a fork for contributions
+>
+> This repository exists for one purpose: run the upstream GitHub Actions build and hand back a
+> signed MSIX package for a personal Xbox console in Dev Mode. The source is an unmodified copy of
+> [gianlucamazza/xllama](https://github.com/gianlucamazza/xllama); no product changes are kept here
+> and no upstream pull requests are prepared here.
+>
+> Changes and pull requests to upstream live in the fork:
+> <https://github.com/duranlisandro/xllama_matrix>.
+> Mechanics, branch layout, version stamping and commands: [BUILD-INFRA.md](BUILD-INFRA.md).
+
 # xllama
 
 > Local inference on Xbox Series S|X — GGUF / llama.cpp, dual-backend dispatch
