@@ -13,6 +13,7 @@ using xllama::sse_done;
 using xllama::sse_event;
 using xllama::sse_payload_is_safe;
 using xllama::sse_response_head;
+using xllama::sse_utf8_complete_prefix;
 
 namespace {
 // Reads one chunked frame back: the size line in hex, then the payload.
