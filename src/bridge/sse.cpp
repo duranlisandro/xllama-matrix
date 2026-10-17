@@ -28,8 +28,7 @@ bool sse_payload_is_safe(std::string_view payload) {
 
 std::string chunk_frame(std::string_view payload) {
     char size_hex[32]{};
-    const auto converted =
-        std::to_chars(size_hex, size_hex + sizeof(size_hex), payload.size(), 16);
+    const auto converted = std::to_chars(size_hex, size_hex + sizeof(size_hex), payload.size(), 16);
     if (converted.ec != std::errc{})
         return {};
     std::string out(size_hex, converted.ptr);

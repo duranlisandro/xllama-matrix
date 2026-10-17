@@ -340,9 +340,8 @@ bool body_wants_stream(const std::string& body) {
 class SseStream {
   public:
     SseStream(StreamSocket const& socket, std::string model)
-        : m_model(std::move(model)),
-          m_id("chatcmpl-xllama-" + std::to_string(time(nullptr)) + "-" +
-               std::to_string(++g_req_counter)) {
+        : m_model(std::move(model)), m_id("chatcmpl-xllama-" + std::to_string(time(nullptr)) + "-" +
+                                          std::to_string(++g_req_counter)) {
         write_raw(socket, ::xllama::sse_response_head());
         m_writer = DataWriter(socket.OutputStream());
         m_writer.UnicodeEncoding(UnicodeEncoding::Utf8);
@@ -755,8 +754,8 @@ std::string handle_tool_proposal_locked(JsonObject const& root, ::xllama::ToolRe
 
 // Handles one chat request under session_hub().mtx (already locked by the caller).
 std::string handle_chat_locked(const std::string& body, const char*& status,
-                               ::xllama::ApiActivity::Ticket& ticket,
-                               StreamSocket const& socket, bool stream) {
+                               ::xllama::ApiActivity::Ticket& ticket, StreamSocket const& socket,
+                               bool stream) {
     JsonObject root{nullptr};
     if (!JsonObject::TryParse(winrt::to_hstring(body), root) || root == nullptr) {
         status = "400 Bad Request";
