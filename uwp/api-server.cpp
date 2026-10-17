@@ -13,6 +13,7 @@
 // pch.h must be first: it includes <unknwn.h> before winrt/base.h (COM IUnknown
 // guard). Sockets + Json are the WinRT namespaces pch.h does not already pull in.
 #include "pch.h"
+#include <atomic>
 #include <winrt/Windows.Data.Json.h>
 #include <winrt/Windows.Networking.Sockets.h>
 // clang-format on
@@ -316,17 +317,45 @@ std::string ollama_error_json(const std::string& message) {
 }
 
 // CORS preflight: browsers OPTIONS non-simple requests before the real POST.
-// True when the client asked for a streamed reply (`stream: true`). A body that
-// does not parse, or a `stream` that is not a boolean, stays on the
-// non-streaming path; the handler's own validation answers it.
-bool body_wants_stream(const std::string& body) {
+enum class StreamRequest { No, Yes, Invalid };
+
+// A body that does not parse stays on the non-streaming path: the handler's own
+// validation answers it. A present `stream` must be a boolean, like /api/pull.
+StreamRequest parse_stream_request(const std::string& body) {
     JsonObject root{nullptr};
     if (!JsonObject::TryParse(winrt::to_hstring(body), root) || root == nullptr)
-        return false;
+        return StreamRequest::No;
     if (!root.HasKey(L"stream"))
-        return false;
+        return StreamRequest::No;
     const auto value = root.GetNamedValue(L"stream");
-    return value.ValueType() == JsonValueType::Boolean && value.GetBoolean();
+    if (value.ValueType() != JsonValueType::Boolean)
+        return StreamRequest::Invalid;
+    return value.GetBoolean() ? StreamRequest::Yes : StreamRequest::No;
+}
+
+enum class SseHeadStatus { Written, FailedBeforeBytes, FailedUnknown };
+
+// Writes the 200 head before SseStream exists, so a failure can still answer
+// with JSON. `FailedBeforeBytes` is reported only when the failure is provably
+// before anything reached the socket (DataWriter construction or encoding);
+// once StoreAsync starts, a partial head cannot be ruled out, so the caller must
+// close instead of writing a second HTTP response.
+SseHeadStatus write_sse_head(StreamSocket const& socket) {
+    try {
+        DataWriter writer(socket.OutputStream());
+        writer.UnicodeEncoding(UnicodeEncoding::Utf8);
+        writer.WriteString(winrt::to_hstring(::xllama::sse_response_head()));
+        try {
+            writer.StoreAsync().get();
+            writer.FlushAsync().get();
+            writer.DetachStream();
+            return SseHeadStatus::Written;
+        } catch (...) {
+            return SseHeadStatus::FailedUnknown;
+        }
+    } catch (...) {
+        return SseHeadStatus::FailedBeforeBytes;
+    }
 }
 
 // Streamed chat completion (docs/api-endpoint.md): each token piece leaves as one
@@ -339,32 +368,38 @@ bool body_wants_stream(const std::string& body) {
 // the non-streaming path.
 class SseStream {
   public:
-    SseStream(StreamSocket const& socket, std::string model)
-        : m_model(std::move(model)), m_id("chatcmpl-xllama-" + std::to_string(time(nullptr)) + "-" +
-                                          std::to_string(++g_req_counter)) {
-        write_raw(socket, ::xllama::sse_response_head());
+    SseStream(StreamSocket const& socket, std::string model, std::atomic<bool>* abort)
+        : m_model(std::move(model)), m_abort(abort),
+          m_id("chatcmpl-xllama-" + std::to_string(time(nullptr)) + "-" +
+               std::to_string(++g_req_counter)) {
         m_writer = DataWriter(socket.OutputStream());
         m_writer.UnicodeEncoding(UnicodeEncoding::Utf8);
+        // OpenAI opens every streamed reply with the assistant role, even when
+        // generation produces no tokens.
+        JsonObject delta;
+        delta.Insert(L"role", JsonValue::CreateStringValue(L"assistant"));
+        delta.Insert(L"content", JsonValue::CreateStringValue(L""));
+        send_chunk(delta, JsonValue::CreateNullValue(), nullptr);
+    }
+
+    // False when the role chunk could not be written: the client is gone before
+    // generation even starts.
+    bool started() const {
+        return !m_finished;
     }
 
     // A token piece can end midway through a multibyte character
     // (llama_token_to_piece returns bytes, not code points). Buffer the trailing
-    // bytes and emit only complete UTF-8 sequences: converting a split sequence
-    // on its own would replace the character with U+FFFD.
+    // bytes and emit only complete UTF-8 sequences; an invalid byte becomes
+    // U+FFFD and is dropped so the rest of the reply keeps flowing.
     void write_delta(std::string_view piece) {
         if (m_finished || piece.empty())
             return;
         m_pending.append(piece.data(), piece.size());
-        const std::size_t complete = ::xllama::sse_utf8_complete_prefix(m_pending);
-        if (complete == 0)
-            return;
-        const std::string text = m_pending.substr(0, complete);
-        m_pending.erase(0, complete);
         try {
-            emit_delta(text);
+            drain_pending(false);
         } catch (...) {
-            // Serialization or the socket failed; the stream cannot continue.
-            m_finished = true;
+            stop();
         }
     }
 
@@ -377,19 +412,24 @@ class SseStream {
         try {
             JsonObject error;
             error.Insert(L"message", JsonValue::CreateStringValue(winrt::to_hstring(message)));
+            error.Insert(L"type", JsonValue::CreateStringValue(L"xllama_error"));
             JsonObject out;
             out.Insert(L"error", error);
             send(winrt::to_string(out.Stringify()));
             end();
         } catch (...) {
-            m_finished = true;
+            stop();
         }
     }
 
     void finish(const wchar_t* reason, int prompt_tokens, int completion_tokens) {
         if (m_finished)
             return;
-        flush_pending();
+        try {
+            drain_pending(true);
+        } catch (...) {
+            stop();
+        }
         if (m_finished)
             return;
         try {
@@ -401,7 +441,7 @@ class SseStream {
             send_chunk(JsonObject{}, JsonValue::CreateStringValue(winrt::hstring(reason)), &usage);
             end();
         } catch (...) {
-            m_finished = true;
+            stop();
         }
     }
 
@@ -414,18 +454,33 @@ class SseStream {
         send_chunk(delta, JsonValue::CreateNullValue(), nullptr);
     }
 
-    // Generation can stop (token cap, failure) in the middle of a sequence.
-    // Those bytes cannot be encoded; surface one replacement character instead
-    // of dropping the tail silently.
-    void flush_pending() {
-        if (m_pending.empty())
-            return;
-        m_pending.clear();
-        try {
-            emit_delta("\xEF\xBF\xBD");
-        } catch (...) {
-            m_finished = true;
+    // Emits complete code points, replaces invalid bytes and advances, and at
+    // finish replaces any truncated tail. Looping is what keeps a malformed byte
+    // from blocking the bytes behind it.
+    void drain_pending(bool finishing) {
+        for (;;) {
+            if (m_finished || m_pending.empty())
+                return;
+            const ::xllama::SseUtf8Step step = ::xllama::sse_utf8_step(m_pending, finishing);
+            if (step.wait)
+                return;
+            if (step.replace) {
+                m_pending.erase(0, 1);
+                emit_delta("\xEF\xBF\xBD");
+                continue;
+            }
+            const std::string text = m_pending.substr(0, step.take);
+            m_pending.erase(0, step.take);
+            emit_delta(text);
         }
+    }
+
+    // A dead socket ends the reply; generation is aborted so the session lock is
+    // released instead of running to EOS behind a client that is already gone.
+    void stop() noexcept {
+        m_finished = true;
+        if (m_abort)
+            m_abort->store(true);
     }
 
     void send_chunk(JsonObject const& delta, IJsonValue const& finish_reason,
@@ -459,8 +514,8 @@ class SseStream {
             m_writer.FlushAsync().get();
             return true;
         } catch (...) {
-            // The client is gone: stop emitting, the caller finishes its turn.
-            m_finished = true;
+            // The client is gone: stop emitting and abort the generation.
+            stop();
             return false;
         }
     }
@@ -476,6 +531,8 @@ class SseStream {
             m_writer.FlushAsync().get();
             m_writer.DetachStream();
         } catch (...) {
+            if (m_abort)
+                m_abort->store(true);
         }
     }
 
@@ -483,6 +540,7 @@ class SseStream {
     std::string m_model;
     std::string m_id;
     std::string m_pending; // trailing bytes of a split UTF-8 sequence
+    std::atomic<bool>* m_abort = nullptr;
     bool m_finished = false;
 };
 
@@ -947,22 +1005,41 @@ std::string handle_chat_locked(const std::string& body, const char*& status,
         }
     }
 
-    // A streamed reply writes its own head, so it is created only here: every
-    // check above can still answer with a normal JSON status.
+    // Every request check is done: from here on, a streamed reply owns the
+    // socket. The head is written before SseStream exists, so a failure that is
+    // provably byte-free can still answer with JSON.
     std::unique_ptr<SseStream> sse;
+    std::atomic<bool> abort{false};
     if (stream) {
-        try {
-            sse = std::make_unique<SseStream>(socket, model);
-        } catch (...) {
-            // The 200 head may already be (partially) on the wire: a JSON error
-            // would be a second HTTP response on the same socket.
+        switch (write_sse_head(socket)) {
+        case SseHeadStatus::Written:
+            break;
+        case SseHeadStatus::FailedBeforeBytes:
+            status = "500 Internal Server Error";
+            return error_json("failed to start the stream");
+        case SseHeadStatus::FailedUnknown:
+            // A partial head may be on the wire: a JSON response would be a
+            // second HTTP response on the same stream.
             status = "500 Internal Server Error";
             return std::string();
         }
+        try {
+            sse = std::make_unique<SseStream>(socket, model, &abort);
+        } catch (...) {
+            status = "500 Internal Server Error";
+            return std::string(); // the 200 head is already out
+        }
+        if (!sse->started()) {
+            status = "500 Internal Server Error";
+            return std::string(); // the role chunk could not be written
+        }
+        gp.abort_flag = &abort;
         gp.on_token = [&sse](std::string_view piece) { sse->write_delta(piece); };
         try {
             const ::xllama::InferenceResult r = session->generate(gp);
             // 200 is already on the wire: only the stream can report the outcome.
+            // A client that disconnected aborts the loop; the partial result is
+            // still a success, and the finish write is dropped by the dead socket.
             ticket.tokens(r.n_prompt, r.n_eval);
             if (!r.success) {
                 status = "500 Internal Server Error";
@@ -1843,6 +1920,14 @@ void handle_connection(StreamSocket const& socket, uint64_t generation) {
         }
 
         if (req.method == "POST" && req.path == "/v1/chat/completions") {
+            // Cheap validation before the session lock: a non-boolean `stream`
+            // is a client error, not a reason to queue behind inference.
+            const StreamRequest stream_request = parse_stream_request(req.body);
+            if (stream_request == StreamRequest::Invalid) {
+                write_response(socket, "400 Bad Request", error_json("'stream' must be boolean"));
+                return;
+            }
+            const bool stream = stream_request == StreamRequest::Yes;
             std::unique_lock<std::mutex> lk = acquire_hub_or_busy();
             if (!lk.owns_lock()) {
                 activity().busy();
@@ -1867,7 +1952,6 @@ void handle_connection(StreamSocket const& socket, uint64_t generation) {
             auto ticket = activity().begin("chat");
             const char* status = "200 OK";
             std::string json;
-            const bool stream = body_wants_stream(req.body);
             try {
                 json = handle_chat_locked(req.body, status, ticket, socket, stream);
             } catch (...) {

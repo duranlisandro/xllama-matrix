@@ -13,7 +13,7 @@ using xllama::sse_done;
 using xllama::sse_event;
 using xllama::sse_payload_is_safe;
 using xllama::sse_response_head;
-using xllama::sse_utf8_complete_prefix;
+using xllama::sse_utf8_step;
 
 namespace {
 // Reads one chunked frame back: the size line in hex, then the payload.
@@ -73,20 +73,81 @@ TEST_CASE("sse: an event inside a chunk reads back byte for byte") {
     CHECK(payload == "data: " + json + "\n\n");
 }
 
-TEST_CASE("sse: only complete UTF-8 sequences are emitted") {
-    // ASCII and complete multibyte sequences pass through whole.
-    CHECK(sse_utf8_complete_prefix("hola") == 4);
-    CHECK(sse_utf8_complete_prefix("caf\xC3\xA9") == 5);      // café
-    CHECK(sse_utf8_complete_prefix("a\xF0\x9F\x98\x80") == 5); // emoji U+1F600
+TEST_CASE("sse: UTF-8 steps keep code points whole") {
+    // ASCII and complete multibyte sequences are taken as they are.
+    CHECK(sse_utf8_step("", false).take == 0);
+    CHECK_FALSE(sse_utf8_step("", false).wait);
+    CHECK(sse_utf8_step("hola", false).take == 4);
+    CHECK(sse_utf8_step("caf\xC3\xA9", false).take == 5);       // café
+    CHECK(sse_utf8_step("a\xF0\x9F\x98\x80", false).take == 5); // emoji U+1F600
+}
 
-    // A token piece that ends inside a sequence stops before those bytes.
-    CHECK(sse_utf8_complete_prefix("caf\xC3") == 3);
-    CHECK(sse_utf8_complete_prefix("a\xF0\x9F\x98") == 1);
-    CHECK(sse_utf8_complete_prefix("a\xF0\x9F") == 1);
+TEST_CASE("sse: a split sequence waits for the next piece") {
+    // A piece that ends inside a sequence first yields its complete prefix; the
+    // truncated tail is what waits for the next piece.
+    auto step = sse_utf8_step("caf\xC3", false);
+    CHECK_FALSE(step.wait);
+    CHECK_FALSE(step.replace);
+    CHECK(step.take == 3);
 
-    // A malformed continuation is not emitted as text.
-    CHECK(sse_utf8_complete_prefix("a\xC3z") == 1);
-    CHECK(sse_utf8_complete_prefix("") == 0);
+    step = sse_utf8_step("\xC3", false);
+    CHECK(step.wait);
+    CHECK(step.take == 0);
+    CHECK_FALSE(step.replace);
+
+    step = sse_utf8_step("a\xF0\x9F\x98", false);
+    CHECK(step.take == 1);
+    step = sse_utf8_step("\xF0\x9F\x98", false);
+    CHECK(step.wait);
+
+    // At finish the truncated tail is replaced instead of waiting forever.
+    step = sse_utf8_step("\xC3", true);
+    CHECK_FALSE(step.wait);
+    CHECK(step.replace);
+    CHECK(step.take == 1);
+}
+
+TEST_CASE("sse: malformed bytes advance instead of stalling") {
+    // An invalid lead is replaced, one byte at a time.
+    auto step = sse_utf8_step("\x80hola", false);
+    CHECK(step.replace);
+    CHECK(step.take == 1);
+
+    // A valid ASCII prefix is emitted first; the bad lead follows on the rescan.
+    step = sse_utf8_step("a\xC3z", false);
+    CHECK_FALSE(step.replace);
+    CHECK_FALSE(step.wait);
+    CHECK(step.take == 1);
+
+    step = sse_utf8_step("\xC3z", false);
+    CHECK(step.replace);
+    CHECK(step.take == 1);
+}
+
+TEST_CASE("sse: draining recovers the text after a malformed byte") {
+    // Mirrors SseStream::drain_pending: replace, drop one byte, rescan.
+    const auto drain = [](std::string pending, bool finishing) {
+        std::string out;
+        while (!pending.empty()) {
+            const auto step = sse_utf8_step(pending, finishing);
+            if (step.wait)
+                break;
+            if (step.replace) {
+                pending.erase(0, 1);
+                out += "\xEF\xBF\xBD";
+                continue;
+            }
+            out += pending.substr(0, step.take);
+            pending.erase(0, step.take);
+        }
+        return out;
+    };
+    CHECK(drain("a\x80"
+                "b",
+                false) == "a\xEF\xBF\xBD"
+                          "b");
+    CHECK(drain("caf\xC3", true) == "caf\xEF\xBF\xBD");
+    CHECK(drain("caf\xC3\xA9", false) == "caf\xC3\xA9");
 }
 
 TEST_CASE("sse: the response head is an event stream without Content-Length") {
@@ -95,6 +156,7 @@ TEST_CASE("sse: the response head is an event stream without Content-Length") {
     CHECK(head.find("Transfer-Encoding: chunked") != std::string::npos);
     CHECK(head.find("Content-Length") == std::string::npos);
     CHECK(head.find("Access-Control-Allow-Origin: *") != std::string::npos);
+    CHECK(head.find("Cache-Control: no-cache") != std::string::npos);
     CHECK(head.size() >= 4);
     CHECK(head.compare(head.size() - 4, 4, "\r\n\r\n") == 0);
 }

@@ -30,12 +30,23 @@ std::string chunk_frame(std::string_view payload);
 // The last chunk of a chunked response.
 std::string chunk_final();
 
-// Length of the longest prefix of `text` that ends on a UTF-8 code-point
-// boundary. A token piece from llama_token_to_piece() can end midway through a
-// multibyte character, so a streamed writer buffers the trailing bytes and emits
-// only this prefix; the next piece completes the sequence. A byte that cannot
-// start a sequence also stops the scan (the caller keeps it buffered).
-std::size_t sse_utf8_complete_prefix(std::string_view text);
+// One step over the bytes buffered between token callbacks. A token piece from
+// llama_token_to_piece() can end midway through a multibyte character, so the
+// streamed writer holds the trailing bytes until the next piece completes them.
+//
+// `take` bytes end on a code-point boundary and can be emitted as text. When
+// `replace` is true the first byte cannot start a valid sequence (or the stream
+// ended there): the writer emits U+FFFD, drops that one byte and scans again, so
+// malformed input advances instead of stalling the rest of the reply. `wait`
+// means the buffer ends with a valid but truncated sequence and `finishing` is
+// false.
+struct SseUtf8Step {
+    std::size_t take = 0;
+    bool replace = false;
+    bool wait = false;
+};
+
+SseUtf8Step sse_utf8_step(std::string_view pending, bool finishing);
 
 // Response head for a streamed completion.
 std::string sse_response_head();

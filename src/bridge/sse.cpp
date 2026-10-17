@@ -42,7 +42,16 @@ std::string chunk_final() {
     return "0\r\n\r\n";
 }
 
-std::size_t sse_utf8_complete_prefix(std::string_view text) {
+namespace {
+
+// Result of scanning buffered bytes: how many form complete code points, and
+// whether the remainder is a valid sequence that is merely truncated.
+struct Scan {
+    std::size_t complete = 0;
+    bool incomplete = false;
+};
+
+Scan scan_utf8(std::string_view text) {
     std::size_t i = 0;
     std::size_t complete = 0;
     while (i < text.size()) {
@@ -57,18 +66,41 @@ std::size_t sse_utf8_complete_prefix(std::string_view text) {
         else if ((lead & 0xF8) == 0xF0)
             continuation = 3;
         else
-            return complete; // not a UTF-8 lead byte: keep it buffered
+            return {complete, false}; // not a UTF-8 lead byte
 
-        if (i + continuation >= text.size())
-            return complete; // the sequence is split across pieces
+        if (i + continuation >= text.size()) {
+            // The sequence is split across pieces. It is only "incomplete" when
+            // the continuation bytes already present are valid; otherwise the
+            // writer must replace the lead byte and rescan.
+            for (std::size_t k = 1; i + k < text.size(); ++k) {
+                if ((static_cast<unsigned char>(text[i + k]) & 0xC0) != 0x80)
+                    return {complete, false};
+            }
+            return {complete, true};
+        }
         for (std::size_t k = 1; k <= continuation; ++k) {
             if ((static_cast<unsigned char>(text[i + k]) & 0xC0) != 0x80)
-                return complete; // malformed sequence: do not emit it as text
+                return {complete, false}; // malformed sequence
         }
         i += continuation + 1;
         complete = i;
     }
-    return complete;
+    return {complete, false};
+}
+
+} // namespace
+
+SseUtf8Step sse_utf8_step(std::string_view pending, bool finishing) {
+    if (pending.empty())
+        return {};
+    const Scan scan = scan_utf8(pending);
+    if (scan.complete > 0)
+        return {scan.complete, false, false};
+    if (scan.incomplete && !finishing)
+        return {0, false, true};
+    // Invalid lead/continuation, or a truncated tail at finish: advance one byte
+    // so the following bytes get rescanned instead of being dropped.
+    return {1, true, false};
 }
 
 std::string sse_response_head() {
