@@ -42,6 +42,35 @@ std::string chunk_final() {
     return "0\r\n\r\n";
 }
 
+std::size_t sse_utf8_complete_prefix(std::string_view text) {
+    std::size_t i = 0;
+    std::size_t complete = 0;
+    while (i < text.size()) {
+        const auto lead = static_cast<unsigned char>(text[i]);
+        std::size_t continuation = 0;
+        if (lead < 0x80)
+            continuation = 0;
+        else if ((lead & 0xE0) == 0xC0)
+            continuation = 1;
+        else if ((lead & 0xF0) == 0xE0)
+            continuation = 2;
+        else if ((lead & 0xF8) == 0xF0)
+            continuation = 3;
+        else
+            return complete; // not a UTF-8 lead byte: keep it buffered
+
+        if (i + continuation >= text.size())
+            return complete; // the sequence is split across pieces
+        for (std::size_t k = 1; k <= continuation; ++k) {
+            if ((static_cast<unsigned char>(text[i + k]) & 0xC0) != 0x80)
+                return complete; // malformed sequence: do not emit it as text
+        }
+        i += continuation + 1;
+        complete = i;
+    }
+    return complete;
+}
+
 std::string sse_response_head() {
     return "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\n"
            "Cache-Control: no-cache\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n"

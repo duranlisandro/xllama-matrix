@@ -347,40 +347,87 @@ class SseStream {
         m_writer.UnicodeEncoding(UnicodeEncoding::Utf8);
     }
 
+    // A token piece can end midway through a multibyte character
+    // (llama_token_to_piece returns bytes, not code points). Buffer the trailing
+    // bytes and emit only complete UTF-8 sequences: converting a split sequence
+    // on its own would replace the character with U+FFFD.
     void write_delta(std::string_view piece) {
         if (m_finished || piece.empty())
             return;
-        JsonObject delta;
-        delta.Insert(L"content", JsonValue::CreateStringValue(winrt::to_hstring(piece)));
-        send_chunk(delta, JsonValue::CreateNullValue(), nullptr);
+        m_pending.append(piece.data(), piece.size());
+        const std::size_t complete = ::xllama::sse_utf8_complete_prefix(m_pending);
+        if (complete == 0)
+            return;
+        const std::string text = m_pending.substr(0, complete);
+        m_pending.erase(0, complete);
+        try {
+            emit_delta(text);
+        } catch (...) {
+            // Serialization or the socket failed; the stream cannot continue.
+            m_finished = true;
+        }
     }
 
     // The stream is already 200 by the time generation fails, so the failure
-    // travels as the last event instead of an HTTP status.
-    void write_error(const std::string& message) {
+    // travels as the last event instead of an HTTP status. Never throws: it is
+    // the recovery path, and a second HTTP response is no longer possible.
+    void write_error(const std::string& message) noexcept {
         if (m_finished)
             return;
-        JsonObject error;
-        error.Insert(L"message", JsonValue::CreateStringValue(winrt::to_hstring(message)));
-        JsonObject out;
-        out.Insert(L"error", error);
-        send(winrt::to_string(out.Stringify()));
-        end();
+        try {
+            JsonObject error;
+            error.Insert(L"message", JsonValue::CreateStringValue(winrt::to_hstring(message)));
+            JsonObject out;
+            out.Insert(L"error", error);
+            send(winrt::to_string(out.Stringify()));
+            end();
+        } catch (...) {
+            m_finished = true;
+        }
     }
 
     void finish(const wchar_t* reason, int prompt_tokens, int completion_tokens) {
         if (m_finished)
             return;
-        JsonObject usage;
-        usage.Insert(L"prompt_tokens", JsonValue::CreateNumberValue(prompt_tokens));
-        usage.Insert(L"completion_tokens", JsonValue::CreateNumberValue(completion_tokens));
-        usage.Insert(L"total_tokens",
-                     JsonValue::CreateNumberValue(prompt_tokens + completion_tokens));
-        send_chunk(JsonObject{}, JsonValue::CreateStringValue(winrt::hstring(reason)), &usage);
-        end();
+        flush_pending();
+        if (m_finished)
+            return;
+        try {
+            JsonObject usage;
+            usage.Insert(L"prompt_tokens", JsonValue::CreateNumberValue(prompt_tokens));
+            usage.Insert(L"completion_tokens", JsonValue::CreateNumberValue(completion_tokens));
+            usage.Insert(L"total_tokens",
+                         JsonValue::CreateNumberValue(prompt_tokens + completion_tokens));
+            send_chunk(JsonObject{}, JsonValue::CreateStringValue(winrt::hstring(reason)), &usage);
+            end();
+        } catch (...) {
+            m_finished = true;
+        }
     }
 
   private:
+    // Emits one delta chunk from text already known to end on a code-point
+    // boundary.
+    void emit_delta(std::string_view text) {
+        JsonObject delta;
+        delta.Insert(L"content", JsonValue::CreateStringValue(winrt::to_hstring(text)));
+        send_chunk(delta, JsonValue::CreateNullValue(), nullptr);
+    }
+
+    // Generation can stop (token cap, failure) in the middle of a sequence.
+    // Those bytes cannot be encoded; surface one replacement character instead
+    // of dropping the tail silently.
+    void flush_pending() {
+        if (m_pending.empty())
+            return;
+        m_pending.clear();
+        try {
+            emit_delta("\xEF\xBF\xBD");
+        } catch (...) {
+            m_finished = true;
+        }
+    }
+
     void send_chunk(JsonObject const& delta, IJsonValue const& finish_reason,
                     JsonObject const* usage) {
         JsonObject choice;
@@ -435,6 +482,7 @@ class SseStream {
     DataWriter m_writer{nullptr};
     std::string m_model;
     std::string m_id;
+    std::string m_pending; // trailing bytes of a split UTF-8 sequence
     bool m_finished = false;
 };
 
@@ -903,23 +951,37 @@ std::string handle_chat_locked(const std::string& body, const char*& status,
     // check above can still answer with a normal JSON status.
     std::unique_ptr<SseStream> sse;
     if (stream) {
-        sse = std::make_unique<SseStream>(socket, model);
-        gp.on_token = [&sse](std::string_view piece) { sse->write_delta(piece); };
-    }
-    const ::xllama::InferenceResult r = session->generate(gp);
-    if (sse) {
-        // 200 is already on the wire: only the stream can report the outcome.
-        ticket.tokens(r.n_prompt, r.n_eval);
-        if (!r.success) {
+        try {
+            sse = std::make_unique<SseStream>(socket, model);
+        } catch (...) {
+            // The 200 head may already be (partially) on the wire: a JSON error
+            // would be a second HTTP response on the same socket.
             status = "500 Internal Server Error";
-            sse->write_error("generation failed: " + r.error_msg);
             return std::string();
         }
-        const bool streamed_cap = r.n_eval >= gp.n_predict;
-        sse->finish(streamed_cap ? L"length" : L"stop", r.n_prompt, r.n_eval);
-        status = "200 OK";
+        gp.on_token = [&sse](std::string_view piece) { sse->write_delta(piece); };
+        try {
+            const ::xllama::InferenceResult r = session->generate(gp);
+            // 200 is already on the wire: only the stream can report the outcome.
+            ticket.tokens(r.n_prompt, r.n_eval);
+            if (!r.success) {
+                status = "500 Internal Server Error";
+                sse->write_error("generation failed: " + r.error_msg);
+                return std::string();
+            }
+            const bool streamed_cap = r.n_eval >= gp.n_predict;
+            sse->finish(streamed_cap ? L"length" : L"stop", r.n_prompt, r.n_eval);
+            status = "200 OK";
+        } catch (...) {
+            // Generation or JSON serialization failed after the head was sent.
+            // write_error is noexcept; the empty body keeps the outer handler
+            // from writing a plain HTTP response on top of the stream.
+            status = "500 Internal Server Error";
+            sse->write_error("generation failed");
+        }
         return std::string(); // handle_connection must not write a second response
     }
+    const ::xllama::InferenceResult r = session->generate(gp);
     if (!r.success) {
         status = "500 Internal Server Error";
         return error_json("generation failed: " + r.error_msg);

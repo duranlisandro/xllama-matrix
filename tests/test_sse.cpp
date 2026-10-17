@@ -72,6 +72,22 @@ TEST_CASE("sse: an event inside a chunk reads back byte for byte") {
     CHECK(payload == "data: " + json + "\n\n");
 }
 
+TEST_CASE("sse: only complete UTF-8 sequences are emitted") {
+    // ASCII and complete multibyte sequences pass through whole.
+    CHECK(sse_utf8_complete_prefix("hola") == 4);
+    CHECK(sse_utf8_complete_prefix("caf\xC3\xA9") == 5);      // café
+    CHECK(sse_utf8_complete_prefix("a\xF0\x9F\x98\x80") == 5); // emoji U+1F600
+
+    // A token piece that ends inside a sequence stops before those bytes.
+    CHECK(sse_utf8_complete_prefix("caf\xC3") == 3);
+    CHECK(sse_utf8_complete_prefix("a\xF0\x9F\x98") == 1);
+    CHECK(sse_utf8_complete_prefix("a\xF0\x9F") == 1);
+
+    // A malformed continuation is not emitted as text.
+    CHECK(sse_utf8_complete_prefix("a\xC3z") == 1);
+    CHECK(sse_utf8_complete_prefix("") == 0);
+}
+
 TEST_CASE("sse: the response head is an event stream without Content-Length") {
     const std::string head = sse_response_head();
     CHECK(head.find("Content-Type: text/event-stream") != std::string::npos);

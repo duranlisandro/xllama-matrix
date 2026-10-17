@@ -128,8 +128,8 @@ alias), `temperature`, `top_p`, `seed`, and `stop` (string or array). Numbers ar
 checked before the model loads, and a bad one is `400` naming the field: the token
 count is a whole number from 1 to the catalogue `n_ctx` minus 1, `temperature` is
 0–2, `top_p` is 0–1, and `seed` is a whole number (a negative seed keeps the
-default, llama.cpp's `-1`). `stream: true`
-is not implemented. Most other fields are ignored.
+default, llama.cpp's `-1`). `stream: true` answers with SSE; see the streaming
+paragraph under [Protocol (v1)](#protocol-v1). Most other fields are ignored.
 
 Plain chat (no tool schema, `tools: []`, or `tool_choice` `"none"`) keeps
 `ChatFormat::render_prompt` (`include/xllama/chat_prompt.h`). Roles are system, user,
