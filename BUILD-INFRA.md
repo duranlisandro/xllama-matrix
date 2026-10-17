@@ -10,10 +10,10 @@ place to prepare pull requests. Those belong to the fork
 
 ## Roles
 
-| Repository | Role |
-| --- | --- |
-| `duranlisandro/xllama_matrix` (fork) | Keep changes, prepare pull requests to upstream |
-| `duranlisandro/xllama-matrix` (this repo, not a fork) | Run GitHub Actions, produce MSIX packages |
+| Repository                                            | Role                                            |
+| ----------------------------------------------------- | ----------------------------------------------- |
+| `duranlisandro/xllama_matrix` (fork)                  | Keep changes, prepare pull requests to upstream |
+| `duranlisandro/xllama-matrix` (this repo, not a fork) | Run GitHub Actions, produce MSIX packages       |
 
 GitHub does not register or enable workflows in a fork (its Actions tab offers no way to
 enable them: `GET /actions/workflows` returns `total_count: 0` and a dispatch returns HTTP
