@@ -35,6 +35,7 @@
     #include "xllama/session.h"
     #include "xllama/session_hub.h"
     #include "xllama/sse.h"
+    #include "xllama/stop_sequence_filter.h"
     #include "xllama/tool_request.h"
     #include "xllama/tool_template.h"
     #include "xllama/tool_transcript.h"
@@ -1034,7 +1035,14 @@ std::string handle_chat_locked(const std::string& body, const char*& status,
             return std::string(); // the role chunk could not be written
         }
         gp.abort_flag = &abort;
-        gp.on_token = [&sse](std::string_view piece) { sse->write_delta(piece); };
+        // The decode loop reports a piece before it checks the stop list, so the
+        // stream withholds any suffix that could still become a stop.
+        ::xllama::StopSequenceFilter stop_filter(gp.stop_sequences);
+        gp.on_token = [&sse, &stop_filter](std::string_view piece) {
+            const std::string text = stop_filter.push(piece);
+            if (!text.empty())
+                sse->write_delta(text);
+        };
         try {
             const ::xllama::InferenceResult r = session->generate(gp);
             // 200 is already on the wire: only the stream can report the outcome.
@@ -1046,6 +1054,11 @@ std::string handle_chat_locked(const std::string& body, const char*& status,
                 sse->write_error("generation failed: " + r.error_msg);
                 return std::string();
             }
+            // Generation can end on EOG or the token cap while a stop prefix is
+            // still held; it never completed a stop, so it is ordinary text.
+            const std::string tail = stop_filter.finish();
+            if (!tail.empty())
+                sse->write_delta(tail);
             const bool streamed_cap = r.n_eval >= gp.n_predict;
             sse->finish(streamed_cap ? L"length" : L"stop", r.n_prompt, r.n_eval);
             status = "200 OK";
