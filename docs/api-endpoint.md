@@ -222,7 +222,9 @@ text/event-stream` over chunked transfer (no `Content-Length`) and the socket cl
 end; token pieces ride `GenerateParams::on_token`. A failure after the head travels as a
 `{"error":{...}}` event, since the 200 is already on the wire. The text is sent **raw**:
 `postprocess_output` (thinking-block stripping, tool parsing) needs the whole reply, so it
-still runs on the non-streaming path only, and a tool proposal ignores `stream`. Measured on
+still runs on the non-streaming path only, and a tool proposal ignores `stream`. Stop
+sequences are never streamed: the writer holds back any suffix that could still complete
+one and drops the match. Measured on
 Series S (2026-10-16, `lfm25-1.2b-instruct`, 52-token reply): first byte at 11 ms against
 1.90 s for the same completion without `stream`, both 1.90 s in total.
 
