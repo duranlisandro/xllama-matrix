@@ -678,6 +678,8 @@ embed)
 	validate_spike || exit 1
 	validate_embed
 	;;
+# Every check below, in order: spike, chat, stream, embed, budget, tools, framing,
+# prefs, train, pull.
 all)
 	rc=0
 	validate_spike || {
