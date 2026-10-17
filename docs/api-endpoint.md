@@ -358,7 +358,7 @@ the Session is hub-owned and is NOT released (the chat UI may be using it).
 
 ## Validation
 
-See `scripts/validate-api.sh` (`spike|chat|budget|tools|framing|embed|pull|prefs|train|all`). Run it **from another host on the LAN**,
+See `scripts/validate-api.sh` (`spike|chat|stream|budget|tools|framing|embed|pull|prefs|train|all`). Run it **from another host on the LAN**,
 not from a client on the console itself — cross-device inbound needs no loopback exemption,
 but a same-host localhost client would (`CheckNetIsolation`). Spike gate first (`GET /` → 200
 proves the bind survives the Series S firewall/PLM), then chat / prefs / train as needed. `tools` checks the tool-proposal contract:
