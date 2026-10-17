@@ -363,7 +363,7 @@ class SseStream {
         JsonObject error;
         error.Insert(L"message", JsonValue::CreateStringValue(winrt::to_hstring(message)));
         JsonObject out;
-        out.Insert(L"error", JsonValue::CreateObjectValue(error));
+        out.Insert(L"error", error);
         send(winrt::to_string(out.Stringify()));
         end();
     }
@@ -385,7 +385,7 @@ class SseStream {
                     JsonObject const* usage) {
         JsonObject choice;
         choice.Insert(L"index", JsonValue::CreateNumberValue(0));
-        choice.Insert(L"delta", JsonValue::CreateObjectValue(delta));
+        choice.Insert(L"delta", delta);
         choice.Insert(L"logprobs", JsonValue::CreateNullValue());
         choice.Insert(L"finish_reason", finish_reason);
         JsonArray choices;
@@ -398,7 +398,7 @@ class SseStream {
         chunk.Insert(L"model", JsonValue::CreateStringValue(winrt::to_hstring(m_model)));
         chunk.Insert(L"choices", choices);
         if (usage != nullptr)
-            chunk.Insert(L"usage", JsonValue::CreateObjectValue(*usage));
+            chunk.Insert(L"usage", *usage);
         send(winrt::to_string(chunk.Stringify()));
     }
 
